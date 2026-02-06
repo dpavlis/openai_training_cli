@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-openai_ft_cli.py  (openai==2.17.0)
+openai_ft_cli.py  (tested for openai==2.17.0)
+
+A small CLI utility for OpenAI-hosted fine-tuning workflows:
 
 Commands:
   models list [--verbose]
@@ -14,14 +16,22 @@ Commands:
                 [--max-rows N] [--include-raw-csv]
                 [--pretty]
 
-Env:
+  cost-estimate <job_id> [--model MODEL] [--pretty]
+
+Environment:
   OPENAI_API_KEY   (required)
   OPENAI_ORG_ID    (optional)
   OPENAI_PROJECT   (optional)
 
-Docs:
-  - Fine-tuning API: https://platform.openai.com/docs/api-reference/fine-tuning
-  - Models API:      https://platform.openai.com/docs/api-reference/models
+Notes:
+- "models list" filters only model IDs starting with "ft:".
+- "stats" dumps everything it can find into one JSON blob:
+    * job metadata
+    * checkpoints (+ metrics)
+    * optional events
+    * result files (downloaded, CSV parsed if applicable)
+- "cost-estimate" reads trained_tokens from the fine-tune job and multiplies
+  by $/1M training tokens for the given model (default: gpt-4.1-mini).
 """
 
 from __future__ import annotations
@@ -41,6 +51,19 @@ except ImportError:
     raise
 
 FINE_TUNE_PREFIXES = ("ft:",)
+
+# Training $/1M tokens (Standard tier) — update if pricing changes.
+# Default is gpt-4.1-mini as requested.
+TRAINING_USD_PER_1M: Dict[str, float] = {
+    "gpt-4.1-mini": 5.00,
+    "gpt-4.1": 25.00,
+    "gpt-4.1-nano": 1.50,
+    "gpt-4o": 25.00,
+    "gpt-4o-mini": 3.00,
+    "gpt-3.5-turbo": 8.00,
+    "davinci-002": 6.00,
+    "babbage-002": 0.40,
+}
 
 
 # ----------------------------
@@ -93,6 +116,29 @@ def build_client() -> OpenAI:
     if default_headers:
         return OpenAI(api_key=api_key, default_headers=default_headers)
     return OpenAI(api_key=api_key)
+
+
+def normalize_model_name(model: str) -> str:
+    """
+    Map versioned names like 'gpt-4.1-mini-2025-04-14' to 'gpt-4.1-mini'
+    when estimating cost.
+    """
+    if not model:
+        return model
+    parts = model.split("-")
+    # Common date suffix: YYYY-MM-DD
+    if len(parts) >= 4 and parts[-3].isdigit() and parts[-2].isdigit() and parts[-1].isdigit():
+        return "-".join(parts[:-3])
+    return model
+
+
+def training_rate_for(model: str) -> float:
+    key = normalize_model_name(model)
+    if key in TRAINING_USD_PER_1M:
+        return TRAINING_USD_PER_1M[key]
+    raise SystemExit(
+        f"Unknown model '{model}'. Use --model with one of: {', '.join(sorted(TRAINING_USD_PER_1M.keys()))}"
+    )
 
 
 # ----------------------------
@@ -237,16 +283,28 @@ def cmd_checkpoints_list(client: OpenAI, job_id: str, limit: int, after: Optiona
 # ----------------------------
 
 def download_file_text(client: OpenAI, file_id: str) -> str:
-    # In 2.x SDK: content(...) returns an object with .text
+    """
+    In openai 2.x SDK: client.files.content(file_id) returns a response-like
+    object. We handle .text or bytes.
+    """
     content = client.files.content(file_id)
+
     text = getattr(content, "text", None)
-    if text is None:
-        # fallback: some variants expose bytes
-        data = getattr(content, "content", None) or getattr(content, "data", None)
-        if isinstance(data, (bytes, bytearray)):
-            return data.decode("utf-8", errors="replace")
-        raise RuntimeError(f"Could not read file content for {file_id}")
-    return text
+    if isinstance(text, str):
+        return text
+
+    data = getattr(content, "content", None) or getattr(content, "data", None)
+    if isinstance(data, (bytes, bytearray)):
+        return data.decode("utf-8", errors="replace")
+
+    # Some SDK versions allow .read()
+    read = getattr(content, "read", None)
+    if callable(read):
+        b = read()
+        if isinstance(b, (bytes, bytearray)):
+            return b.decode("utf-8", errors="replace")
+
+    raise RuntimeError(f"Could not read file content for {file_id}")
 
 
 def parse_csv_text(csv_text: str, max_rows: int) -> List[Dict[str, Any]]:
@@ -256,7 +314,7 @@ def parse_csv_text(csv_text: str, max_rows: int) -> List[Dict[str, Any]]:
     for i, row in enumerate(reader):
         if max_rows >= 0 and i >= max_rows:
             break
-        # keep values as strings (LLM-friendly + lossless). User can cast later.
+        # Keep strings (lossless); your downstream LLM/tooling can cast.
         rows.append(dict(row))
     return rows
 
@@ -270,59 +328,53 @@ def cmd_stats(
     include_raw_csv: bool,
     pretty: bool,
 ) -> int:
-    # Retrieve job
     job = client.fine_tuning.jobs.retrieve(job_id)
     job_d = to_plain_dict(job)
 
-    # Checkpoints (pull a "reasonable max"; user can increase with checkpoints cmd)
     cps = list(list_ft_checkpoints(client, job_id=job_id, limit=100, after=None))
-    cps_d = [to_plain_dict(c) for c in sorted(cps, key=lambda x: getattr(x, "created_at", 0))]
+    cps_sorted = sorted(cps, key=lambda x: getattr(x, "created_at", 0))
+    cps_d = [to_plain_dict(c) for c in cps_sorted]
 
-    # Events (optional)
     events_d: Optional[List[Dict[str, Any]]] = None
     if include_events:
         ev = list(list_ft_events(client, job_id=job_id, limit=events_limit, after=None))
         ev_sorted = sorted(ev, key=lambda x: getattr(x, "created_at", 0))
         events_d = [to_plain_dict(e) for e in ev_sorted]
 
-    # Result files: download + parse if CSV
     result_files = job_d.get("result_files") or []
     result_files_out: List[Dict[str, Any]] = []
 
     for fid in result_files:
-        meta = to_plain_dict(client.files.retrieve(fid))
-        entry: Dict[str, Any] = {"file_id": fid, "meta": meta}
-
+        entry: Dict[str, Any] = {"file_id": fid}
         try:
+            meta = to_plain_dict(client.files.retrieve(fid))
+            entry["meta"] = meta
+
             text = download_file_text(client, fid)
-            # Many fine-tune result files are CSV (often named results.csv)
-            if (meta.get("filename") or "").lower().endswith(".csv"):
+
+            filename = (meta.get("filename") or "").lower()
+            looks_csv = filename.endswith(".csv") or (text.splitlines() and "," in text.splitlines()[0])
+
+            if looks_csv:
                 entry["rows"] = parse_csv_text(text, max_rows=max_rows)
-                # surface column names (helps LLM reasoning)
                 if entry["rows"]:
                     entry["columns"] = list(entry["rows"][0].keys())
             else:
-                # unknown format; still include first rows if it looks CSV-ish
-                if "," in text.splitlines()[0]:
-                    entry["rows"] = parse_csv_text(text, max_rows=max_rows)
-                    if entry["rows"]:
-                        entry["columns"] = list(entry["rows"][0].keys())
-                else:
-                    entry["text_preview"] = text[:5000]
+                entry["text_preview"] = text[:5000]
+
             if include_raw_csv:
                 entry["raw_text"] = text
+
         except Exception as e:
             entry["download_error"] = str(e)
 
         result_files_out.append(entry)
 
-    # Output one JSON object so you can pipe into another LLM or save
     out = {
         "job": job_d,
         "checkpoints": cps_d,
         "events": events_d,
         "result_files": result_files_out,
-        # convenience: tell you which loss-like keys exist in results.csv/checkpoints
         "hints": {
             "result_file_loss_like_columns": sorted(
                 {
@@ -342,10 +394,52 @@ def cmd_stats(
         },
     }
 
-    if pretty:
-        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(out, ensure_ascii=False, indent=2 if pretty else None, sort_keys=True))
+    return 0
+
+
+# ----------------------------
+# Cost estimate (trained_tokens * rate)
+# ----------------------------
+
+def cmd_cost_estimate(client: OpenAI, job_id: str, model: str, pretty: bool) -> int:
+    job = client.fine_tuning.jobs.retrieve(job_id)
+    job_d = to_plain_dict(job)
+
+    trained_tokens = job_d.get("trained_tokens")
+    job_model = job_d.get("model")
+
+    # Pricing model: CLI override (default provided) or job.model if CLI empty
+    model_for_calc = model or job_model or "gpt-4.1-mini"
+    rate = training_rate_for(model_for_calc)
+
+    if trained_tokens is None:
+        out = {
+            "job_id": job_id,
+            "status": job_d.get("status"),
+            "trained_tokens": None,
+            "note": "trained_tokens is null while job is running; rerun when finished.",
+            "model_for_estimate": model_for_calc,
+            "training_usd_per_1m_tokens": rate,
+            "job_model": job_model,
+            "fine_tuned_model": job_d.get("fine_tuned_model"),
+        }
     else:
-        print(json.dumps(out, ensure_ascii=False, sort_keys=True))
+        estimated_usd = (float(trained_tokens) / 1_000_000.0) * float(rate)
+        out = {
+            "job_id": job_id,
+            "status": job_d.get("status"),
+            "trained_tokens": trained_tokens,
+            "model_for_estimate": model_for_calc,
+            "training_usd_per_1m_tokens": rate,
+            "estimated_training_usd": estimated_usd,
+            "job_model": job_model,
+            "fine_tuned_model": job_d.get("fine_tuned_model"),
+            "created_at": job_d.get("created_at"),
+            "finished_at": job_d.get("finished_at"),
+        }
+
+    print(json.dumps(out, ensure_ascii=False, indent=2 if pretty else None, sort_keys=True))
     return 0
 
 
@@ -354,7 +448,7 @@ def cmd_stats(
 # ----------------------------
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="OpenAI fine-tune utility (models + jobs/events/checkpoints + stats).")
+    p = argparse.ArgumentParser(description="OpenAI fine-tune utility (models + jobs/events/checkpoints + stats + cost-estimate).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # models
@@ -362,7 +456,7 @@ def main() -> int:
     sub_models = p_models.add_subparsers(dest="models_cmd", required=True)
 
     p_models_list = sub_models.add_parser("list", help="List fine-tuned models (ids starting with ft:)")
-    p_models_list.add_argument("--verbose", action="store_true", help="Print all available fields as JSON (one object per line).")
+    p_models_list.add_argument("--verbose", action="store_true", help="Print all available fields as JSONL")
 
     p_models_del = sub_models.add_parser("delete", help="Delete a fine-tuned model by id")
     p_models_del.add_argument("model_id", help="Fine-tuned model id (e.g., ft:...)")
@@ -395,9 +489,20 @@ def main() -> int:
     p_stats.add_argument("job_id", help="Fine-tuning job id (e.g., ftjob-...)")
     p_stats.add_argument("--no-events", action="store_true", help="Do not include events timeline")
     p_stats.add_argument("--events-limit", type=int, default=200, help="Max events to include (default: 200)")
-    p_stats.add_argument("--max-rows", type=int, default=5000, help="Max CSV rows per result file to parse (default: 5000; -1 = unlimited)")
+    p_stats.add_argument("--max-rows", type=int, default=5000, help="Max CSV rows per result file (default: 5000; -1 = unlimited)")
     p_stats.add_argument("--include-raw-csv", action="store_true", help="Include full raw results file text (can be large)")
     p_stats.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+
+    # cost-estimate
+    p_cost = sub.add_parser("cost-estimate", help="Estimate training cost from trained_tokens")
+    p_cost.add_argument("job_id", help="Fine-tuning job id (e.g., ftjob-...)")
+    p_cost.add_argument(
+        "--model",
+        default="gpt-4.1-mini",
+        help="Model name used for pricing (default: gpt-4.1-mini). "
+             f"Known: {', '.join(sorted(TRAINING_USD_PER_1M.keys()))}",
+    )
+    p_cost.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
 
     args = p.parse_args()
     client = build_client()
@@ -428,6 +533,9 @@ def main() -> int:
             include_raw_csv=args.include_raw_csv,
             pretty=args.pretty,
         )
+
+    if args.cmd == "cost-estimate":
+        return cmd_cost_estimate(client, job_id=args.job_id, model=args.model, pretty=args.pretty)
 
     return 2
 

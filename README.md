@@ -1,4 +1,4 @@
-# openai-ft-cli
+# openai-training-cli
 
 A lightweight command-line utility for **OpenAI-hosted fine-tuning** workflows (tested with `openai==2.17.0`).
 
