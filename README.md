@@ -298,4 +298,4 @@ python openai_cli.py models delete "ft:..."
 
 ## License
 
-Use/modify internally as you like. If you plan to publish, add a license header and choose a license (MIT/Apache-2.0/etc.).
+MIT
