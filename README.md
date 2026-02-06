@@ -19,7 +19,7 @@ There isn’t an obvious, maintained “basic admin CLI” that covers these eve
 
 ## What it does
 
-This single-file CLI (`openai_ft_cli.py`) provides:
+This single-file CLI (`openai_cli.py`) provides:
 
 - **Models**
   - list your fine-tuned models (filters `ft:` IDs)
@@ -86,13 +86,13 @@ export OPENAI_PROJECT="proj_..."
 Make the script executable (optional):
 
 ```bash
-chmod +x openai_ft_cli.py
+chmod +x openai_cli.py
 ```
 
 Run:
 
 ```bash
-python openai_ft_cli.py --help
+python openai_cli.py --help
 ```
 
 ---
@@ -104,8 +104,8 @@ python openai_ft_cli.py --help
 Lists fine-tuned models visible to your key (IDs starting with `ft:`).
 
 ```bash
-python openai_ft_cli.py models list
-python openai_ft_cli.py models list --verbose
+python openai_cli.py models list
+python openai_cli.py models list --verbose
 ```
 
 Options:
@@ -119,7 +119,7 @@ Options:
 Deletes a fine-tuned model by ID (must look like `ft:...`).
 
 ```bash
-python openai_ft_cli.py models delete "ft:..."
+python openai_cli.py models delete "ft:..."
 ```
 
 Notes:
@@ -132,10 +132,10 @@ Notes:
 Lists fine-tuning jobs.
 
 ```bash
-python openai_ft_cli.py jobs list
-python openai_ft_cli.py jobs list --limit 50
-python openai_ft_cli.py jobs list --after ftjob_...   # pagination cursor
-python openai_ft_cli.py jobs list --verbose
+python openai_cli.py jobs list
+python openai_cli.py jobs list --limit 50
+python openai_cli.py jobs list --after ftjob_...   # pagination cursor
+python openai_cli.py jobs list --verbose
 ```
 
 Options:
@@ -150,9 +150,9 @@ Options:
 Lists events for a fine-tuning job (progress/status messages).
 
 ```bash
-python openai_ft_cli.py events ftjob-...
-python openai_ft_cli.py events ftjob-... --limit 200
-python openai_ft_cli.py events ftjob-... --verbose | jq .
+python openai_cli.py events ftjob-...
+python openai_cli.py events ftjob-... --limit 200
+python openai_cli.py events ftjob-... --verbose | jq .
 ```
 
 Options:
@@ -167,8 +167,8 @@ Options:
 Lists checkpoints for a fine-tuning job, including checkpoint metrics (when available).
 
 ```bash
-python openai_ft_cli.py checkpoints ftjob-...
-python openai_ft_cli.py checkpoints ftjob-... --verbose | jq .
+python openai_cli.py checkpoints ftjob-...
+python openai_cli.py checkpoints ftjob-... --verbose | jq .
 ```
 
 Options:
@@ -189,7 +189,7 @@ It pulls:
 - result files listed on the job (downloads them and parses CSV when applicable)
 
 ```bash
-python openai_ft_cli.py stats ftjob-... --pretty > ftjob_stats.json
+python openai_cli.py stats ftjob-... --pretty > ftjob_stats.json
 ```
 
 Options:
@@ -208,13 +208,13 @@ Typical usage patterns:
 
 ```bash
 # full dump (pretty)
-python openai_ft_cli.py stats ftjob-... --pretty > stats.json
+python openai_cli.py stats ftjob-... --pretty > stats.json
 
 # smaller dump (skip events)
-python openai_ft_cli.py stats ftjob-... --no-events > stats_no_events.json
+python openai_cli.py stats ftjob-... --no-events > stats_no_events.json
 
 # include raw CSV (largest)
-python openai_ft_cli.py stats ftjob-... --include-raw-csv > stats_with_raw.json
+python openai_cli.py stats ftjob-... --include-raw-csv > stats_with_raw.json
 ```
 
 Output notes:
@@ -231,7 +231,7 @@ Output notes:
 Estimates training cost from `trained_tokens`:
 
 ```bash
-python openai_ft_cli.py cost-estimate ftjob-... --pretty
+python openai_cli.py cost-estimate ftjob-... --pretty
 ```
 
 Options:
@@ -244,10 +244,10 @@ Examples:
 
 ```bash
 # default gpt-4.1-mini
-python openai_ft_cli.py cost-estimate ftjob-... --pretty
+python openai_cli.py cost-estimate ftjob-... --pretty
 
 # estimate using a different model pricing
-python openai_ft_cli.py cost-estimate ftjob-... --model gpt-4.1 --pretty
+python openai_cli.py cost-estimate ftjob-... --model gpt-4.1 --pretty
 ```
 
 Notes:
@@ -261,22 +261,22 @@ Notes:
 ### Find the latest completed job and inspect metrics
 
 ```bash
-python openai_ft_cli.py jobs list --limit 20
-python openai_ft_cli.py checkpoints ftjob-... 
-python openai_ft_cli.py stats ftjob-... --no-events --pretty > stats.json
+python openai_cli.py jobs list --limit 20
+python openai_cli.py checkpoints ftjob-... 
+python openai_cli.py stats ftjob-... --no-events --pretty > stats.json
 ```
 
 ### Compare models you’ve created
 
 ```bash
-python openai_ft_cli.py models list
-python openai_ft_cli.py models list --verbose | jq -r '.id'
+python openai_cli.py models list
+python openai_cli.py models list --verbose | jq -r '.id'
 ```
 
 ### Clean up an old fine-tuned model
 
 ```bash
-python openai_ft_cli.py models delete "ft:..."
+python openai_cli.py models delete "ft:..."
 ```
 
 ---
